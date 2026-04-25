@@ -4,6 +4,8 @@ A symmetric, fully-duplex RPC library for Ruby.
 
 > *Once a TCP connection is established, the notion of "which side called whom" dissolves. There is no client. There is no server. Only peers, growing toward each other like hyphae in a mycelial mat.*
 
+<div align="center"><img width="320" height="320" alt="e19a5764-cc5c-4bb6-9354-906250ec7538" src="https://github.com/user-attachments/assets/d366676e-85a4-44b1-a4d7-722ad60137c2" /></div>
+
 ## Why Mycel?
 
 Most RPC libraries treat one side as a server (passive, exposes methods) and the other as a client (active, makes calls). Mycel doesn't. Both endpoints share the same `Peer` API: each one **registers methods** the other can invoke, and each one **calls methods** the other has registered. The TCP transport is full-duplex; Mycel makes the application layer match.
