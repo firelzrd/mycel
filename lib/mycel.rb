@@ -21,6 +21,42 @@ require_relative 'mycel/version'
 
 module Mycel
   # =========================================================================
+  # Cross-cutting: Current session context
+  # =========================================================================
+  #
+  # During execution of a registered RPC method handler (and any code it
+  # calls — helpers, services, plugins), `Mycel.current_session` returns the
+  # `Mycel::Channel::Session` whose peer initiated the call. Outside such a
+  # context (e.g. plain library code, or after the handler returns) it is nil.
+  #
+  # This is implemented with `Thread.current` rather than a block argument so
+  # that handlers retain their existing signatures and any code at any depth
+  # can ask "who called me?" without having to thread a session_id through
+  # every method. Concurrent calls land on independent threads (mycel spawns
+  # a worker per inbound Job by default), so the values do not bleed between
+  # peers.
+  #
+  # Test fixtures and code that wants to invoke a handler outside the normal
+  # mycel dispatch path can use `Mycel.with_current_session(fake_session) { ... }`
+  # to set the context manually.
+
+  def self.current_session
+    Thread.current[:mycel_current_session]
+  end
+
+  def self.current_session_id
+    current_session&.session_id
+  end
+
+  def self.with_current_session(session)
+    prev = Thread.current[:mycel_current_session]
+    Thread.current[:mycel_current_session] = session
+    yield
+  ensure
+    Thread.current[:mycel_current_session] = prev
+  end
+
+  # =========================================================================
   # Cross-cutting: Callbacks
   # =========================================================================
   module Callbacks
@@ -374,6 +410,8 @@ module Mycel
 
       class InvalidStateError < RuntimeError; end
 
+      attr_reader :session
+
       def initialize(session)
         @session = session
         @state = STATE_INIT
@@ -594,6 +632,14 @@ module Mycel
       #   which is fine for moderate load and bounded by max_concurrent_jobs.
       #   Pass an Mycel::ThreadPool (or any callable that implements the
       #   same protocol) to switch to a fixed-size worker pool.
+      # `session_id` is the Hub-assigned identifier and is set by the Hub
+      # after construction (the Session itself does not generate it, so that
+      # the Hub remains the sole authority for namespacing IDs across server
+      # and client pools). It is `nil` until the Hub assigns it. Code reading
+      # `Mycel.current_session_id` from inside an RPC handler will see the
+      # assigned value because handler dispatch happens after registration.
+      attr_accessor :session_id
+
       def initialize(io, codec: Mycel::Codec::JSON, max_concurrent_jobs: nil, executor: nil)
         unless codec.respond_to?(:encode) && codec.respond_to?(:decode)
           raise ArgumentError, "codec must respond to :encode and :decode"
@@ -602,6 +648,7 @@ module Mycel
           raise ArgumentError, "executor must respond to :call"
         end
 
+        @session_id = nil
         @io = io
         @codec = codec
         @executor = executor
@@ -1011,6 +1058,7 @@ module Mycel
         session = @client_session_class.new(socket, codec: @codec, max_concurrent_jobs: @max_concurrent_jobs, executor: @executor)
         @sessions_lock.synchronize {
           id = generate_id
+          session.session_id = id
           @client_sessions[id] = session
           callback(:client_session, id, session)
           callback(:session, id, session)
@@ -1039,6 +1087,7 @@ module Mycel
             session = @server_session_class.new(socket, codec: @codec, max_concurrent_jobs: @max_concurrent_jobs, executor: @executor)
             @sessions_lock.synchronize {
               id = generate_id
+              session.session_id = id
               @server_sessions[id] = session
               callback(:server_session, id, session)
               callback(:session, id, session)
@@ -1246,7 +1295,10 @@ module Mycel
         params      = payload["params"] || []
 
         begin
-          job.respond(ok_response(execute_method(method_name, params)))
+          result = Mycel.with_current_session(job.session) do
+            execute_method(method_name, params)
+          end
+          job.respond(ok_response(result))
         rescue => e
           job.respond(error_response(e))
         end

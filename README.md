@@ -121,6 +121,23 @@ The dependency graph is strictly downward: `RPC → Channel → {Framing, Transp
 - **Zero monkey-patching.** Mycel does not open `class IO`, `module Socket::TCP`, or any other Ruby standard namespace. Everything lives under `Mycel::*`.
 - **Single file.** The entire library is one self-contained `lib/mycel.rb`. No autoloading magic, no scattered concerns.
 
+## Knowing Who Called You
+
+Inside a registered RPC handler — and in any helper or service it calls — you can ask `Mycel.current_session_id` to discover which peer initiated the current call. The handler's block signature does not change; the value is per-thread, set by mycel before each handler invocation and unwound on return.
+
+```ruby
+endpoint.peer.register_method(:login) do |account_id, password|
+  raise 'invalid' unless verify(account_id, password)
+  # Bind this account to the *calling* peer for the lifetime of the connection.
+  bind_account(account_id, Mycel.current_session_id)
+  :ok
+end
+```
+
+Concurrent inbound calls run on independent threads, so two peers calling `:login` simultaneously observe their own session ids — the values do not bleed between handlers. Outside a handler context (e.g. plain library code), `Mycel.current_session_id` returns `nil`.
+
+For tests or code that wants to invoke a handler outside the normal mycel dispatch path, use `Mycel.with_current_session(fake_session) { ... }` to install a context manually.
+
 ## Bidirectional RPC, Concretely
 
 A common pattern: register methods on **both** sides of the same connection.
@@ -160,7 +177,7 @@ The bottom of `lib/mycel.rb` contains a 40-line tour script demonstrating sync c
 bundle exec rspec
 ```
 
-132 examples cover Framing, Transport, Channel, RPC, integration scenarios, edge cases (UTF-8, large payloads, churn), backpressure, codec swaps, idempotent close, protocol versioning, and ThreadPool semantics.
+140 examples cover Framing, Transport, Channel, RPC, current-session context, integration scenarios, edge cases (UTF-8, large payloads, churn), backpressure, codec swaps, idempotent close, protocol versioning, and ThreadPool semantics.
 
 ## License
 

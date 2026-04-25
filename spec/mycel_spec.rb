@@ -1758,3 +1758,145 @@ RSpec.describe 'Calling after shutdown' do
     server.shutdown
   end
 end
+
+# ===========================================================================
+# Cross-cutting: current session context
+# ===========================================================================
+RSpec.describe 'Mycel.current_session / current_session_id' do
+  it 'returns nil outside any handler context' do
+    expect(Mycel.current_session).to be_nil
+    expect(Mycel.current_session_id).to be_nil
+  end
+
+  it 'returns the calling peer’s session inside a handler block' do
+    port = next_port
+    server = Mycel::RPC::Endpoint.new
+    captured = Queue.new
+    server.peer.register_method(:whoami) {
+      captured.enq(session_id: Mycel.current_session_id, session: Mycel.current_session)
+      'ok'
+    }
+    server.start_server(port)
+    client = Mycel::RPC::Endpoint.new
+    client.connect_to('localhost', port)
+    client.call_remote(:whoami)
+    info = captured.deq
+    expect(info[:session_id]).to be_a(String)
+    expect(info[:session_id]).not_to be_empty
+    expect(info[:session]).to be_a(Mycel::Channel::Session)
+    # The server-side session_id must match the id of one of the server's accepted sessions.
+    expect(server.server_session_ids).to include(info[:session_id])
+    client.shutdown; server.shutdown
+  end
+
+  it 'is reachable from helper code called by the handler (same thread)' do
+    port = next_port
+    server = Mycel::RPC::Endpoint.new
+    helper = ->(captured) { captured << Mycel.current_session_id }
+    captured = Queue.new
+    server.peer.register_method(:check) {
+      result = []
+      helper.call(result)
+      captured.enq(result.first)
+      'ok'
+    }
+    server.start_server(port)
+    client = Mycel::RPC::Endpoint.new
+    client.connect_to('localhost', port)
+    client.call_remote(:check)
+    sid_in_helper = captured.deq
+    expect(sid_in_helper).to be_a(String)
+    expect(sid_in_helper).not_to be_empty
+    client.shutdown; server.shutdown
+  end
+
+  it 'returns to nil after the handler returns (Thread.current is unwound)' do
+    port = next_port
+    server = Mycel::RPC::Endpoint.new
+    server.peer.register_method(:noop) { 'ok' }
+    server.start_server(port)
+    client = Mycel::RPC::Endpoint.new
+    client.connect_to('localhost', port)
+    client.call_remote(:noop)
+    # Sample on the main thread — must always be nil there because mycel
+    # never sets it on the test thread.
+    expect(Mycel.current_session_id).to be_nil
+    client.shutdown; server.shutdown
+  end
+
+  it 'does not bleed session context across concurrent inbound calls' do
+    port = next_port
+    server = Mycel::RPC::Endpoint.new
+    barrier = Queue.new
+    seen_pairs = Queue.new
+    server.peer.register_method(:check) {
+      sid_at_start = Mycel.current_session_id
+      # Park inside the handler until the test releases us, so multiple
+      # handlers run concurrently with overlapping execution.
+      barrier.deq
+      sid_at_end = Mycel.current_session_id
+      seen_pairs.enq([sid_at_start, sid_at_end])
+      'ok'
+    }
+    server.start_server(port)
+    client_a = Mycel::RPC::Endpoint.new
+    client_b = Mycel::RPC::Endpoint.new
+    client_a.connect_to('localhost', port)
+    client_b.connect_to('localhost', port)
+    t_a = Thread.new { client_a.call_remote(:check) }
+    t_b = Thread.new { client_b.call_remote(:check) }
+    wait_for { server.server_session_ids.size == 2 }
+    # Release both handlers — they were parked on barrier.deq.
+    2.times { barrier.enq(:go) }
+    pairs = [seen_pairs.deq, seen_pairs.deq]
+    # Each handler must observe the *same* sid before and after the park —
+    # if Thread.current bled, sid_at_end would equal the *other* handler's sid.
+    pairs.each { |start_sid, end_sid| expect(start_sid).to eq(end_sid) }
+    # And the two handlers must see *different* sids (one per session).
+    expect(pairs.map(&:first).uniq.size).to eq(2)
+    t_a.join; t_b.join
+    client_a.shutdown; client_b.shutdown; server.shutdown
+  end
+
+  it 'allows manual context with Mycel.with_current_session for tests' do
+    fake = Object.new
+    def fake.session_id; 'fake-sid'; end
+    Mycel.with_current_session(fake) do
+      expect(Mycel.current_session).to be(fake)
+      expect(Mycel.current_session_id).to eq('fake-sid')
+    end
+    expect(Mycel.current_session).to be_nil
+  end
+
+  it 'restores the previous context on nested with_current_session' do
+    outer = Object.new; def outer.session_id; 'outer'; end
+    inner = Object.new; def inner.session_id; 'inner'; end
+    Mycel.with_current_session(outer) do
+      expect(Mycel.current_session_id).to eq('outer')
+      Mycel.with_current_session(inner) do
+        expect(Mycel.current_session_id).to eq('inner')
+      end
+      expect(Mycel.current_session_id).to eq('outer')
+    end
+    expect(Mycel.current_session_id).to be_nil
+  end
+end
+
+RSpec.describe 'Channel::Session#session_id assignment' do
+  it 'is nil before Hub registration and set after a connection is accepted' do
+    port = next_port
+    server = Mycel::RPC::Endpoint.new
+    server.start_server(port)
+    client = Mycel::RPC::Endpoint.new
+    client.connect_to('localhost', port)
+    wait_for { server.server_session_ids.size == 1 }
+    sid = server.server_session_ids.first
+    session = server.hub.get_session(sid)
+    expect(session.session_id).to eq(sid)
+    # Same on the client side.
+    csid = client.client_session_ids.first
+    csession = client.hub.get_session(csid)
+    expect(csession.session_id).to eq(csid)
+    client.shutdown; server.shutdown
+  end
+end

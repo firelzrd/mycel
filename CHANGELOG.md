@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-04-26
+
+### Added
+
+- **`Mycel.current_session` / `Mycel.current_session_id`** — module-level accessors that return the calling peer's `Channel::Session` (and its ID) while an RPC handler is executing. Backed by `Thread.current`, so handlers retain their original `register_method(name) { |*params| ... }` signatures *and* helper methods called from any depth can ask "who called me?" without threading a session_id through every call. Returns `nil` outside a handler context. Concurrent inbound calls land on independent worker threads and do not bleed.
+- **`Mycel.with_current_session(session) { ... }`** — public wrapper used internally by `Peer#handle_method_request` to set the context. Also useful in tests to invoke a registered handler with a fake session attached.
+- **`Channel::Session#session_id`** — accessor for the Hub-assigned identifier (set after Hub registration; `nil` before). Required for `Mycel.current_session_id` to work, and also handy for logging.
+- **`Channel::Context#session`** — public reader so `Job` (a `Context` subclass) can expose its owning Session to dispatch code.
+
 ## [0.1.0] — 2026-04-26
 
 Initial release.
@@ -30,4 +39,5 @@ Initial release.
 - **Zero monkey-patching of Ruby standard classes** — no `class IO` open, no `module Socket::TCP` open. Everything lives under `Mycel::*`.
 - **132-example RSpec suite** covering Framing, Transport, Channel, RPC, integration scenarios, edge cases (UTF-8, large payloads, churn), backpressure, codec swaps, idempotent close, protocol versioning, and `ThreadPool` semantics.
 
+[0.1.1]: https://github.com/firelzrd/mycel/releases/tag/v0.1.1
 [0.1.0]: https://github.com/firelzrd/mycel/releases/tag/v0.1.0
